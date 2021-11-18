@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import pytesseract
 import matplotlib.pyplot as pl
+import math
 
 debug_dir = './debug'
 im_dir = './images'
@@ -11,7 +12,7 @@ def otsu_t (img):
     print('Calculating Otsu threshold')
     ## de-noising
     # add gaussian blur to reduce image noise
-    img = cv2.GaussianBlur(img, (5,5),0)
+    # img = cv2.GaussianBlur(img, (5,5),0)
 
     cv2.imwrite(f'{debug_dir}/gblur_{args.imname}.jpg', img) # checkpoint 1 gaussian blur
 
@@ -57,8 +58,50 @@ def otsu_t (img):
     _, output = cv2.threshold(img, th, 255, cv2.THRESH_BINARY)
     print('Otsu thresholding Applied')
 
-    cv2.imwrite(f'{debug_dir}/processed_{args.imname}.jpg', output)
     return output
+
+def improvement1(img):
+    output = img
+    output1 = cv2.medianBlur(output,3) # blur 1
+    output2 = cv2.medianBlur(output,51) # blur 2
+
+    # divide the 2 blur images and normalize the pixel values
+    output = np.ma.divide(output1, output2).data
+    output = np.uint8(255*output/output.max())
+
+    # use simple 2D filter to sharpen the image
+    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    output = cv2.filter2D(output, -1, kernel)
+    return output
+
+
+def improvement2 (img):
+    Gx = np.array([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]])
+    Gy = np.array([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]])
+    [rows, columns] = np.shape(img)  # we need to know the shape of the input grayscale image
+    output = np.zeros(shape=(rows, columns))  # initialization of the output image array (all elements are 0)
+
+    # Now we "sweep" the image in both x and y directions and compute the output
+    for i in range(rows - 2):
+        for j in range(columns - 2):
+            gx = np.sum(np.multiply(Gx, img[i:i + 3, j:j + 3]))  # x direction
+            gy = np.sum(np.multiply(Gy, img[i:i + 3, j:j + 3]))  # y direction
+            output[i + 1, j + 1] = np.sqrt(gx ** 2 + gy ** 2)  # calculate the "hypotenuse"
+    
+    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    output = cv2.filter2D(output, -1, kernel)
+    return output
+
+def unsharp_mask(image, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0):
+    blurred = cv2.GaussianBlur(image, kernel_size, sigma)
+    sharpened = float(amount + 1) * image - float(amount) * blurred
+    sharpened = np.maximum(sharpened, np.zeros(sharpened.shape))
+    sharpened = np.minimum(sharpened, 255 * np.ones(sharpened.shape))
+    sharpened = sharpened.round().astype(np.uint8)
+    if threshold > 0:
+        low_contrast_mask = np.absolute(image - blurred) < threshold
+        np.copyto(sharpened, image, where=low_contrast_mask)
+    return sharpened
 
 # for sanity check, cross-checking output with above function
 def otsu_lib(img):
@@ -115,7 +158,6 @@ def deskew(image):
 def match_template(image, template):
     return cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
 
-
 ## Tesseract function
 def translate(img):
     print('Translating image...')
@@ -127,7 +169,10 @@ def translate(img):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Teserract OCR program parser.')
-    image_path = parser.add_argument('--imname', default='sample01')
+    parser.add_argument('--imname', default='sample01')
+    parser.add_argument('--otsu', default=False)
+    parser.add_argument('--otsu_improved1', default=False)
+    parser.add_argument('--otsu_improved2', default=False)
     args = parser.parse_args()
 
     print('Reading image...')
@@ -135,8 +180,31 @@ if __name__ == '__main__':
     # read image in greyscale mode
     img = cv2.imread(f'{im_dir}/{args.imname}.png', 0)
 
-    img = otsu_t(img)
-    otsu_lib(img) # sanity check with cv2 otsu thresholding
-    ocr_result = translate(img)
-    with open(f'./result_{args.imname}.txt', 'w') as tf:
-        tf.write(ocr_result)
+    ## Base Otsu thresholding
+    if args.otsu:
+        output = otsu_t(img)
+        cv2.imwrite(f'./processed_{args.imname}.jpg', output)
+        otsu_lib(img) # sanity check with cv2 otsu thresholding to ensure that our implementation is correct
+        ocr_result = translate(output)
+
+        with open(f'./result_otsu_{args.imname}.txt', 'w') as tf:
+            tf.write(ocr_result)
+
+    ## Improvement1: Equalized illumination
+    if args.otsu_improved1:
+        output = improvement1(img)
+        cv2.imwrite(f'./processed_improved1_{args.imname}.jpg', output)
+        ocr_result = translate(output)
+
+        with open(f'./result_otsu_improved1_{args.imname}.txt', 'w') as tf:
+            tf.write(ocr_result)
+
+    ## Improvement2: 
+    if args.otsu_improved2:
+        output = improvement2(img)
+        cv2.imwrite(f'./processed_improved2_{args.imname}.jpg', output)
+        output = cv2.imread(f'./processed_improved2_{args.imname}.jpg', 0)
+        ocr_result = translate(output)
+
+        with open(f'./result_otsu_improved2_{args.imname}.txt', 'w') as tf:
+            tf.write(ocr_result)
